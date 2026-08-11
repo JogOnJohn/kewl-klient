@@ -1,0 +1,62 @@
+package kewl.plugins;
+
+import java.awt.Color;
+import java.awt.Graphics2D;
+import java.awt.Point;
+
+import kewl.Plugin;
+import kewl.api.Entity;
+import kewl.api.Game;
+import kewl.api.Players;
+import kewl.ui.Hud;
+import kewl.ui.Theme;
+
+/**
+ * Draws a box over every other player.
+ *
+ * <p>The simplest possible overlay plugin: no state, no actions, nothing in {@code tick()}. Read this
+ * one first if you want to draw something.</p>
+ */
+public final class PlayerVisuals extends Plugin {
+
+    public PlayerVisuals() {
+        config.colour("colour", "Colour", "Box colour", new Color(90, 200, 255));
+        config.bool("tile", "Mark tiles", "Outline the tile each player is standing on", false);
+        config.bool("combat", "Show combat level", "Draw their combat level above the box", true);
+        config.number("range", "Range", "Only draw players within this many tiles", 30, 1, 60);
+    }
+
+    @Override public String name() { return "Player visuals"; }
+
+    @Override public String description() { return "Boxes and combat levels over other players."; }
+
+    @Override public int hotkey() { return 0; }          // F1
+
+    @Override public String status() { return Players.all().size() + " visible"; }
+
+    @Override
+    public void render(Graphics2D g) {
+        if (!Game.ready()) return;
+
+        Color colour = config.colour("colour");
+        int range = config.number("range");
+        boolean tiles = config.bool("tile");
+        boolean combat = config.bool("combat");
+
+        g.setFont(Theme.UI);
+        for (Entity p : Players.all()) {
+            if (p.distance() > range) continue;
+
+            if (tiles) Hud.tile(g, Game.tileOutline(p.sceneX(), p.sceneY()), colour);
+
+            Point at = p.screen();
+            if (at == null) continue;
+            Hud.entityBox(g, at, 16, 34, colour);
+
+            // For a player the id slot carries their combat level -- see Entity.id().
+            if (combat && p.id() > 0) {
+                Hud.textCentred(g, "lvl " + p.id(), at.x, at.y - 38, colour);
+            }
+        }
+    }
+}

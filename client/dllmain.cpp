@@ -1,30 +1,27 @@
 // dllmain.cpp -- KewlKlient's native half.
 //
-// Injected into the game, it:
-//   1. starts a Java VM and hands it four native methods (see jvm.hpp),
-//   2. puts a transparent always-on-top window over the game and draws boxes on it,
-//   3. calls kewl.KewlKlient.tick() about thirty times a second so Java plugins run.
+// Injected into the game, it does four things and then gets out of the way:
+//   1. starts a Java VM and registers the natives (jvm.hpp),
+//   2. finds the game window,
+//   3. puts a transparent always-on-top window over it (overlay.hpp),
+//   4. calls kewl.KewlKlient.tick() about thirty times a second.
 //
-// The ESP is drawn here rather than in Java only because drawing is the one thing C++ is genuinely
-// better placed to do -- it already has the pointers. Everything you would actually want to CHANGE
-// lives in java/.
+// Notice what is NOT here any more: drawing. Java renders the whole overlay into an image and hands it
+// back through present(). Everything you would actually want to CHANGE lives in java/.
 //
-// WHY A SEPARATE WINDOW instead of hooking the game's renderer: hooking needs a detour library, a
-// graphics API to get right, and it crashes inside someone else's render loop when you get it wrong. A
-// layered window is forty lines you can read in one sitting. It looks worse and it will not appear in
-// screenshots or recordings. That trade is deliberate -- this is a client you are meant to learn from.
+// The one exception is the error path at the bottom. If Java never came up, Java cannot tell you why --
+// so a few lines of GDI put the reason on screen. That is worth the duplication; a client that fails
+// silently is a client nobody can fix.
 #include <windows.h>
 #include <string>
 #include "game.hpp"
+#include "overlay.hpp"
 #include "jvm.hpp"
 
 namespace {
 
-bool g_espPlayers = true;
-bool g_espNpcs    = true;
-HWND g_overlay    = nullptr;
-HWND g_game       = nullptr;
-std::string g_javaError;      // shown on the panel if the VM never came up
+HWND        g_game = nullptr;
+std::string g_javaError;      // shown natively if the VM never started
 
 // ------------------------------------------------------------------------------------------------
 // Find the game's window: the biggest visible top-level window this process owns.
@@ -48,95 +45,66 @@ HWND findGameWindow() {
 }
 
 // ------------------------------------------------------------------------------------------------
-// Drawing
+// The only drawing C++ still does: telling you why Java is not drawing.
 // ------------------------------------------------------------------------------------------------
-void text(HDC dc, int x, int y, COLORREF col, const std::string& s) {
-    SetTextColor(dc, RGB(0, 0, 0));                    // cheap shadow so it reads on any background
-    TextOutA(dc, x + 1, y + 1, s.c_str(), static_cast<int>(s.size()));
-    SetTextColor(dc, col);
-    TextOutA(dc, x, y, s.c_str(), static_cast<int>(s.size()));
-}
+void renderJavaError(int w, int h) {
+    if (!kk::overlay::ensureSurface(w, h)) return;
 
-void box(HDC dc, HPEN pen, float cx, float cy) {
-    HGDIOBJ old = SelectObject(dc, pen);
-    const int w = 14, h = 26;
-    int l = static_cast<int>(cx) - w / 2, t = static_cast<int>(cy) - h;
-    MoveToEx(dc, l, t, nullptr);
-    LineTo(dc, l + w, t);  LineTo(dc, l + w, t + h);  LineTo(dc, l, t + h);  LineTo(dc, l, t);
-    SelectObject(dc, old);
-}
+    // Start from fully transparent, then paint an opaque panel. Every pixel we touch needs alpha 255
+    // or UpdateLayeredWindow will treat it as invisible.
+    std::memset(kk::overlay::g_pixels, 0, static_cast<std::size_t>(w) * h * 4);
 
-void render(HDC dc, int width, int height) {
-    HBRUSH bg = CreateSolidBrush(RGB(0, 0, 0));        // our transparent colour
-    RECT full{ 0, 0, width, height };
-    FillRect(dc, &full, bg);
+    HDC dc = kk::overlay::g_memDc;
+    RECT panel{ 10, 10, 560, 84 };
+    HBRUSH bg = CreateSolidBrush(RGB(24, 24, 28));
+    FillRect(dc, &panel, bg);
     DeleteObject(bg);
+
     SetBkMode(dc, TRANSPARENT);
+    HFONT font = CreateFontA(15, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
+                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             FF_DONTCARE, "Segoe UI");
+    HGDIOBJ oldFont = SelectObject(dc, font);
 
-    // -- the panel. This is the entire UI, and it is meant to be boring.
-    int y = 8;
-    text(dc, 8, y, RGB(255, 255, 255), "KewlKlient");                              y += 16;
-    text(dc, 8, y, RGB(170, 170, 170), "F1 players  F2 npcs   F5..F8 -> plugins"); y += 16;
-    text(dc, 8, y, g_espPlayers ? RGB(120, 255, 120) : RGB(140, 140, 140),
-         std::string("players ") + (g_espPlayers ? "ON" : "off"));                 y += 14;
-    text(dc, 8, y, g_espNpcs ? RGB(120, 255, 120) : RGB(140, 140, 140),
-         std::string("npcs    ") + (g_espNpcs ? "ON" : "off"));                    y += 16;
+    SetTextColor(dc, RGB(255, 120, 120));
+    TextOutA(dc, 22, 20, "KewlKlient: Java did not start", 30);
+    SetTextColor(dc, RGB(210, 210, 215));
+    TextOutA(dc, 22, 42, g_javaError.c_str(), static_cast<int>(g_javaError.size()));
+    SetTextColor(dc, RGB(140, 140, 150));
+    TextOutA(dc, 22, 60, "check java= in kewlklient.ini", 29);
 
-    if (!g_javaError.empty()) {
-        text(dc, 8, y, RGB(255, 140, 140), "java: " + g_javaError);                y += 14;
-    } else {
-        // Whatever the Java side wants to say, one line per plugin.
-        std::string s = kk::jvmStatus();
-        std::size_t start = 0;
-        while (start < s.size()) {
-            std::size_t nl = s.find('\n', start);
-            if (nl == std::string::npos) nl = s.size();
-            if (nl > start) text(dc, 8, y, RGB(200, 200, 255), s.substr(start, nl - start));
-            y += 14;
-            start = nl + 1;
+    SelectObject(dc, oldFont);
+    DeleteObject(font);
+
+    // GDI text leaves the alpha byte at zero, which would make everything we just drew invisible.
+    // Force the panel opaque.
+    auto* px = static_cast<std::uint32_t*>(kk::overlay::g_pixels);
+    for (int y = panel.top; y < panel.bottom && y < h; ++y) {
+        for (int x = panel.left; x < panel.right && x < w; ++x) {
+            px[static_cast<std::size_t>(y) * w + x] |= 0xFF000000u;
         }
     }
-    y += 4;
 
-    if (!kk::clientObj()) {
-        text(dc, 8, y, RGB(255, 180, 180), "waiting for the game to load...");
-        return;
-    }
-
-    // -- the ESP
-    HPEN players = CreatePen(PS_SOLID, 1, RGB(90, 200, 255));
-    HPEN npcs    = CreatePen(PS_SOLID, 1, RGB(255, 220, 90));
-    int me = kk::localPlayerUid();
-
-    kk::forEachEntity([&](const kk::Entity& e) {
-        if (e.uid == me) return;                       // do not box yourself
-        bool player = kk::isPlayerUid(e.uid);
-        if (player ? !g_espPlayers : !g_espNpcs) return;
-        float sx = 0.f, sy = 0.f;
-        if (!kk::project(e.sceneX, e.sceneY, sx, sy)) return;
-        if (sx < 0 || sy < 0 || sx > width || sy > height) return;
-        box(dc, player ? players : npcs, sx, sy);
-    });
-
-    DeleteObject(players);
-    DeleteObject(npcs);
+    POINT         srcPt{ 0, 0 };
+    SIZE          size{ w, h };
+    BLENDFUNCTION blend{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    HDC screen = GetDC(nullptr);
+    UpdateLayeredWindow(kk::overlay::g_hwnd, screen, nullptr, &size, dc, &srcPt, 0, &blend, ULW_ALPHA);
+    ReleaseDC(nullptr, screen);
 }
 
 // ------------------------------------------------------------------------------------------------
-// Keys. Edge-detected, so holding a key toggles once. F1/F2 are ours; F5..F8 go to Java as a bitmask.
+// Keys. Edge-detected, so holding a key toggles once. All of them go to Java as a bitmask -- the
+// native side has no opinion about what F1 means any more, because the plugins decide that.
 // ------------------------------------------------------------------------------------------------
 int pollKeys() {
-    static bool prev[6] = {};
-    const int vks[6] = { VK_F1, VK_F2, VK_F5, VK_F6, VK_F7, VK_F8 };
+    static bool prev[8] = {};
+    const int vks[8] = { VK_F1, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8 };
     int mask = 0;
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 8; ++i) {
         bool down = (GetAsyncKeyState(vks[i]) & 0x8000) != 0;
-        bool edge = down && !prev[i];
+        if (down && !prev[i]) mask |= 1 << i;      // F1 -> bit 0
         prev[i] = down;
-        if (!edge) continue;
-        if (i == 0) g_espPlayers = !g_espPlayers;
-        else if (i == 1) g_espNpcs = !g_espNpcs;
-        else mask |= 1 << (i - 2);                     // F5 -> bit 0
     }
     return mask;
 }
@@ -159,17 +127,19 @@ DWORD WINAPI run(LPVOID module) {
     dir.resize(dir.find_last_of(L'\\'));
     std::wstring ini = dir + L"\\kewlklient.ini";
 
-    // Start Java. If this fails the overlay still runs and shows why, which beats a silent no-op.
+    // Find the game window BEFORE starting Java: the Java side asks for the viewport as soon as it
+    // starts, and a null window there would have it build a zero-sized image.
+    for (int i = 0; i < 600 && !g_game; ++i) { g_game = findGameWindow(); Sleep(100); }
+    if (!g_game) return 0;
+    kk::g_gameWindow = g_game;
+
     std::wstring javaHome = iniString(ini, L"java", L"");
     std::wstring jar      = dir + L"\\kewlklient.jar";
     if (javaHome.empty()) {
-        g_javaError = "java= not set in kewlklient.ini";
+        g_javaError = "java= is not set in kewlklient.ini";
     } else if (!kk::startJvm(javaHome, jar, g_javaError)) {
         // g_javaError already says what went wrong.
     }
-
-    for (int i = 0; i < 600 && !g_game; ++i) { g_game = findGameWindow(); Sleep(100); }
-    if (!g_game) return 0;
 
     WNDCLASSEXW wc{ sizeof wc };
     wc.lpfnWndProc   = wndProc;
@@ -177,52 +147,34 @@ DWORD WINAPI run(LPVOID module) {
     wc.lpszClassName = L"KewlKlientOverlay";
     RegisterClassExW(&wc);
 
-    g_overlay = CreateWindowExW(
+    // WS_EX_TRANSPARENT is what makes clicks fall through to the game underneath. Without it the
+    // overlay eats every click and the game becomes unplayable, which is a memorable ten minutes.
+    kk::overlay::g_hwnd = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         wc.lpszClassName, L"", WS_POPUP, 0, 0, 100, 100, nullptr, nullptr, wc.hInstance, nullptr);
-    if (!g_overlay) return 0;
-
-    SetLayeredWindowAttributes(g_overlay, RGB(0, 0, 0), 0, LWA_COLORKEY);
-    ShowWindow(g_overlay, SW_SHOWNOACTIVATE);
-
-    HFONT font = CreateFontA(14, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
-                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                             FF_DONTCARE, "Consolas");
+    if (!kk::overlay::g_hwnd) return 0;
+    ShowWindow(kk::overlay::g_hwnd, SW_SHOWNOACTIVATE);
 
     MSG msg{};
     while (IsWindow(g_game)) {
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
 
-        RECT r{};
-        GetClientRect(g_game, &r);
-        POINT tl{ r.left, r.top };
-        ClientToScreen(g_game, &tl);
-        int w = r.right - r.left, h = r.bottom - r.top;
-        SetWindowPos(g_overlay, HWND_TOPMOST, tl.x, tl.y, w, h, SWP_NOACTIVATE);
+        kk::overlay::followWindow(g_game);
 
-        kk::tickJvm(pollKeys());
+        if (g_javaError.empty()) {
+            // Java draws and presents. We do nothing but ask.
+            kk::tickJvm(pollKeys());
+        } else {
+            RECT r{};
+            GetClientRect(g_game, &r);
+            renderJavaError(r.right - r.left, r.bottom - r.top);
+        }
 
-        // Draw off-screen then blit once, or it flickers badly.
-        HDC screen = GetDC(g_overlay);
-        HDC back = CreateCompatibleDC(screen);
-        HBITMAP bmp = CreateCompatibleBitmap(screen, w, h);
-        HGDIOBJ oldBmp = SelectObject(back, bmp);
-        HGDIOBJ oldFnt = SelectObject(back, font);
-
-        render(back, w, h);
-        BitBlt(screen, 0, 0, w, h, back, 0, 0, SRCCOPY);
-
-        SelectObject(back, oldFnt);
-        SelectObject(back, oldBmp);
-        DeleteObject(bmp);
-        DeleteDC(back);
-        ReleaseDC(g_overlay, screen);
-
-        Sleep(33);                                     // ~30 fps is plenty for boxes
+        Sleep(33);                                     // ~30 fps is plenty for an overlay
     }
 
-    DeleteObject(font);
-    DestroyWindow(g_overlay);
+    kk::overlay::releaseSurface();
+    DestroyWindow(kk::overlay::g_hwnd);
     return 0;
 }
 

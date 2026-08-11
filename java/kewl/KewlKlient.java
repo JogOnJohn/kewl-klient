@@ -1,83 +1,149 @@
 package kewl;
 
+import java.awt.Graphics2D;
+import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferInt;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
+import javax.swing.SwingUtilities;
+
+import kewl.api.Game;
+import kewl.api.Skills;
+import kewl.ui.Sidebar;
+
 /**
- * The entry point the native side calls into, and the only class that talks to it.
+ * The client.
  *
- * <p>The C++ half registers the four {@code native} methods below at startup, then calls {@link #start()}
- * once and {@link #tick(int)} about thirty times a second. Everything else in KewlKlient is ordinary Java
- * and you can change it without touching a compiler flag.</p>
+ * <p>C++ injects itself into the game, starts a JVM, and calls {@link #start()} once and {@link
+ * #tick(int)} about thirty times a second. Everything from here down is ordinary Java.</p>
  *
- * <p><b>Why so few natives.</b> Every native method is a place where a mistake crashes the game instead of
- * throwing an exception. Four is enough to write real bots: see what is around you, know where you are,
- * click something, and know whether you are logged in. If you want a fifth, check first that you cannot
- * build it out of these -- most things can be.</p>
+ * <h2>Adding a plugin</h2>
+ *
+ * <p>Write a class extending {@link Plugin}, add it to {@link #PLUGINS}, rebuild. That is the whole
+ * plugin system -- the list below IS the registry. No scanning, no annotations, no manifest, nothing
+ * that can silently fail to find your class.</p>
  */
 public final class KewlKlient {
 
     private KewlKlient() {}
 
-    // ---------------------------------------------------------------------------------------------
-    // The native surface. Implemented in client/jvm.hpp. Do not rename without changing both sides.
-    // ---------------------------------------------------------------------------------------------
-
-    /** Flat {uid, sceneX, sceneY, isPlayer} per visible entity. Use {@link Game#entities()} instead. */
-    static native int[] entities();
-
-    /** {worldX, worldY} of the loaded scene's south-west corner, or an empty array. */
-    static native int[] sceneBase();
-
-    /** Click something, in SCENE coordinates. Use the helpers on {@link Game}. */
-    static native void doAction(int sceneX, int sceneY, int opcode, int targetId);
-
-    /** True once you are actually in-game. */
-    static native boolean ready();
-
-    // ---------------------------------------------------------------------------------------------
-    // Plugins
-    // ---------------------------------------------------------------------------------------------
-
-    /** Add yours here. That is the whole registration mechanism -- there is no scanning or config. */
+    /**
+     * Every plugin, in the order they appear in the control panel.
+     *
+     * <p><b>Add yours here.</b> One line.</p>
+     */
     private static final List<Plugin> PLUGINS = new ArrayList<>(List.of(
+            new kewl.plugins.PlayerVisuals(),
+            new kewl.plugins.NpcVisuals(),
             new kewl.plugins.Woodcutter()
     ));
 
+    // The overlay image, reused between frames. Reallocating eight megabytes thirty times a second
+    // would keep the garbage collector permanently busy for no reason.
+    private static BufferedImage canvas;
+    private static int[] pixels;
+    private static int canvasWidth, canvasHeight;
+
+    /** Called once by the native side after the VM starts. */
     public static void start() {
-        System.out.println("[KewlKlient] up, " + PLUGINS.size() + " plugin(s)");
+        System.out.println("KewlKlient: " + PLUGINS.size() + " plugins");
+
+        // Anything a plugin wants on by default, it says so here rather than in its constructor, so
+        // "what is on when I start" is one list rather than a hunt through every plugin.
         for (Plugin p : PLUGINS) {
-            try {
-                p.start();
-            } catch (Throwable t) {
-                System.out.println("[KewlKlient] " + p.name() + " failed to start: " + t);
+            if (p instanceof kewl.plugins.PlayerVisuals || p instanceof kewl.plugins.NpcVisuals) {
+                p.setEnabled(true);
             }
         }
+
+        // Swing has to be built on its own thread. The render loop never touches it again -- the panel
+        // polls, rather than the loop pushing, precisely so these two threads share nothing.
+        SwingUtilities.invokeLater(() -> {
+            try {
+                Sidebar.open(PLUGINS);
+            } catch (Throwable t) {
+                System.out.println("KewlKlient: control panel failed to open: " + t);
+            }
+        });
     }
 
     /**
-     * One frame. {@code keys} carries which function keys were pressed since the last tick -- bit 0 is
-     * F5, bit 1 F6, and so on up to F8. F1..F4 belong to the overlay itself.
+     * One frame: read the world, run the plugins, draw, and hand the result back to be shown.
      *
-     * <p>A plugin that throws is caught and reported, never propagated: one broken plugin must not take
-     * the client, or the game, down with it.</p>
+     * @param keys bitmask of function keys pressed since the last frame; bit 0 is F1, bit 7 is F8
      */
     public static void tick(int keys) {
-        if (!ready()) return;
-        for (Plugin p : PLUGINS) {
-            try {
-                p.keys(keys);
-                if (p.enabled()) p.tick();
-            } catch (Throwable t) {
-                System.out.println("[KewlKlient] " + p.name() + " threw: " + t);
+        Skills.newFrame();
+        Game.refresh();
+
+        if (keys != 0) {
+            for (Plugin p : PLUGINS) {
+                int k = p.hotkey();
+                if (k >= 0 && k < 8 && (keys & (1 << k)) != 0) p.toggle();
             }
         }
+
+        for (Plugin p : PLUGINS) {
+            if (!p.isEnabled()) continue;
+            try {
+                p.tick();
+            } catch (Throwable t) {
+                // One broken plugin must not stop the other two, and must never reach the game.
+                System.out.println("[" + p.name() + "] tick threw: " + t);
+            }
+        }
+
+        render();
     }
 
-    /** One line per plugin for the overlay panel. */
+    /** Draw every enabled plugin's overlay and present it. */
+    private static void render() {
+        int[] view = Natives.viewport();
+        if (view.length != 4) return;
+        int w = view[2], h = view[3];
+        if (w <= 0 || h <= 0) return;
+
+        if (canvas == null || w != canvasWidth || h != canvasHeight) {
+            // TYPE_INT_ARGB_PRE, not TYPE_INT_ARGB: the layered window wants premultiplied alpha, and
+            // drawing straight into the right format means nothing has to convert it later.
+            canvas = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB_PRE);
+            pixels = ((DataBufferInt) canvas.getRaster().getDataBuffer()).getData();
+            canvasWidth = w;
+            canvasHeight = h;
+        }
+
+        Arrays.fill(pixels, 0);                 // fully transparent -- the game shows through
+
+        Graphics2D g = canvas.createGraphics();
+        try {
+            Sidebar.prettyText(g);
+            for (Plugin p : PLUGINS) {
+                if (!p.isEnabled()) continue;
+                try {
+                    p.render(g);
+                } catch (Throwable t) {
+                    System.out.println("[" + p.name() + "] render threw: " + t);
+                }
+            }
+        } finally {
+            g.dispose();
+        }
+
+        Natives.present(pixels, w, h);
+    }
+
+    /** One line per enabled plugin. The native side shows this if Java is up but nothing has drawn. */
     public static String status() {
         StringBuilder sb = new StringBuilder();
-        for (Plugin p : PLUGINS) sb.append(p.name()).append(": ").append(p.status()).append('\n');
+        for (Plugin p : PLUGINS) {
+            if (!p.isEnabled()) continue;
+            sb.append(p.name());
+            String s = p.status();
+            if (s != null && !s.isEmpty()) sb.append(": ").append(s);
+            sb.append('\n');
+        }
         return sb.toString();
     }
 }

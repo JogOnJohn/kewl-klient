@@ -1,26 +1,36 @@
 # KewlKlient
 
-A small, ugly, readable OSRS client. Player and NPC boxes, one example bot, and about 900 lines of code
-you can hold in your head.
+A small, readable OSRS client with a plugin panel, entity visuals, and a worked example bot — in about
+two thousand lines you can hold in your head.
 
-It exists to be **learned from and hacked on**, not to be pretty. The UI is deliberately plain. There is
-no auto-updater, no account manager, no plugin store. What there is:
+It exists to be **learned from and hacked on**. There is no auto-updater, no account manager, no plugin
+store. What there is:
 
-- **Plugins are Java.** You write a class, add one line, rebuild. No C++ toolchain needed to write a bot.
+- **Everything is Java.** Plugins, settings, the control panel, and all the drawing. No C++ toolchain
+  needed to write a bot or an overlay.
+- **Overlays are plain Java2D.** Your plugin gets a `Graphics2D` over the game window and draws whatever
+  it likes — shapes, alpha, antialiased text, images. Nothing had to expose a "draw box" primitive.
+- **Settings build their own UI.** Declare a setting; the control panel grows the right widget for it.
+  No plugin writes a line of Swing.
 - **No network code at all.** We never build a packet. We call the game's own "do this menu action"
   function and let it build and send the packet. That is the single biggest reason this codebase is
   small, and the reason it survives most game updates.
-- **Four native methods.** That is the entire unsafe surface. Everything else is ordinary Java.
+- **Ten native methods.** That is the entire unsafe surface, all in one file.
 
 ```
        launcher                       injected into the game
     ┌──────────────┐                ┌────────────────────────────────┐
     │  one button  │ ── inject ──>  │  kewlklient.dll                │
-    └──────────────┘                │    reads memory, draws boxes   │
+    └──────────────┘                │    reads memory                │
                                     │    starts a JVM ───────────────┼──> kewlklient.jar
-                                    │    4 natives ──────────────────┼──>   your plugins
-                                    └────────────────────────────────┘
+                                    │    10 natives ─────────────────┼──>   api + your plugins
+                                    │  <── one finished image/frame ─┼──    overlays (Java2D)
+                                    └────────────────────────────────┘        control panel (Swing)
 ```
+
+**Java draws, C++ shows.** Java renders the whole overlay into an image and hands it back once a frame;
+C++ puts it on screen and otherwise stays out of the way. That inversion is why a plugin can draw
+anything Java2D can draw, and it costs one memcpy a frame.
 
 ---
 
@@ -58,14 +68,15 @@ gradlew run
 Same thing. `gradlew dist` builds without launching, and `build.bat` is a wrapper around it for people
 who prefer a double-click.
 
-In game:
+A **control panel** opens beside the game with a switch and settings for every plugin. The same plugins
+have hotkeys:
 
 | key | does |
 |-----|------|
-| F1 | player boxes on/off |
-| F2 | NPC boxes on/off |
-| F5 | the woodcutter plugin on/off |
-| F6–F8 | free, for your plugins |
+| F1 | player visuals on/off |
+| F2 | NPC visuals on/off |
+| F5 | the woodcutter on/off |
+| F3, F4, F6–F8 | free, for your plugins |
 
 If nothing appears, see [Troubleshooting](#troubleshooting).
 
@@ -73,63 +84,131 @@ If nothing appears, see [Troubleshooting](#troubleshooting).
 
 ## Writing a plugin
 
-This is the whole thing:
+Extend `Plugin`, override what you need, add one line to the list. This one draws a marker on the
+nearest cow and counts them:
 
 ```java
 package kewl.plugins;
 
-import kewl.Game;
+import java.awt.Color;
+import java.awt.Graphics2D;
+import java.awt.Point;
+
 import kewl.Plugin;
+import kewl.api.Entity;
+import kewl.api.Npcs;
+import kewl.ui.Hud;
 
-public final class Waver implements Plugin {
-    private boolean on;
+public final class CowSpotter extends Plugin {
 
-    @Override public String name()  { return "waver"; }
-    @Override public boolean enabled() { return on; }
-    @Override public void setEnabled(boolean v) { on = v; }
-    @Override public void keys(int pressed) { if ((pressed & 2) != 0) on = !on; }   // bit 1 = F6
+    public CowSpotter() {
+        config.number("range", "Range", "How far to look", 10, 1, 30);
+        config.colour("colour", "Colour", "", new Color(255, 120, 200));
+    }
+
+    @Override public String name()        { return "Cow spotter"; }
+    @Override public String description() { return "Marks the nearest cow."; }
+    @Override public int    hotkey()      { return 5; }          // F6
 
     @Override
-    public void tick() {
-        Game.Entity npc = Game.nearest(Game.npcs());
-        if (npc != null) System.out.println("nearest npc at " + npc.worldX() + "," + npc.worldY());
+    public void render(Graphics2D g) {
+        Entity cow = Npcs.nearestWithin(config.number("range"), 2805);
+        if (cow == null) return;
+        Point at = cow.screen();
+        if (at != null) Hud.entityBox(g, at, 16, 30, config.colour("colour"));
     }
 }
 ```
 
-Add it to the list in `java/kewl/KewlKlient.java`:
+Add it in `java/kewl/KewlKlient.java`:
 
 ```java
 private static final List<Plugin> PLUGINS = new ArrayList<>(List.of(
+        new kewl.plugins.PlayerVisuals(),
+        new kewl.plugins.NpcVisuals(),
         new kewl.plugins.Woodcutter(),
-        new kewl.plugins.Waver()          // <- yours
+        new kewl.plugins.CowSpotter()          // <- yours
 ));
 ```
 
-Rebuild, restart the game, press F6. That is the entire plugin system — there is no scanning, no
-manifest, no reflection.
+Rebuild, restart the client. Your plugin is in the panel with a range slider and a colour picker you
+never wrote. **That list is the entire plugin system** — no scanning, no annotations, no manifest,
+nothing that can silently fail to find your class.
 
-**`tick()` runs ~30 times a second.** Never sleep in it. If you want something every few seconds, keep a
-`long lastX` field and compare `System.currentTimeMillis()`, like `Woodcutter` does.
+**Read [`Woodcutter.java`](java/kewl/plugins/Woodcutter.java) next.** It is the worked example and does
+all four things at once: settings, a decision loop that acts on the game, a world overlay, and a
+statistics panel.
+
+### The two methods
+
+| | for | rules |
+|---|---|---|
+| `tick()` | deciding and acting | runs every frame while enabled |
+| `render(Graphics2D)` | drawing, and nothing else | runs after every plugin has ticked |
+
+Keeping them apart means you can turn the drawing off without changing behaviour.
+
+**Neither may block.** They run about thirty times a second on the overlay thread; a `Thread.sleep` in
+either freezes the overlay. For "every few seconds", keep a `long lastX` field and compare
+`System.currentTimeMillis()` — `Woodcutter` shows the pattern, and also shows why you want a timer
+*and* an animation check rather than either alone.
 
 ### What a plugin can see and do
 
-Everything is on `kewl.Game`:
-
 ```java
-Game.ready()                              // are we in-game yet
-Game.entities()                           // every visible NPC and player, except you
-Game.npcs()  Game.players()               // filtered
-Game.nearest(list)                        // closest by tile distance
-Game.sceneBase()                          // {worldX, worldY} of the loaded chunk's corner
-Game.toScene(worldX, worldY)              // world -> scene, or null if not loaded
-Game.interactObject(id, worldX, worldY)   // click a tree/rock/door
+// kewl.api.Game -- the world, as of the start of this frame
+Game.ready()                          Game.me()
+Game.npcs()   Game.players()          Game.entities()
+Game.toScene(worldX, worldY)          // world -> scene, null if not loaded
+
+// projection, through the game's own camera maths
+Game.projectWorld(x, y)               // -> Point, or null when off screen
+Game.tileOutlineWorld(x, y)           // -> Polygon lying flat on the ground
+
+// kewl.api.Npcs / Players -- finding things
+Npcs.nearest(1278)                    Npcs.nearestWithin(10, 2805)
+Npcs.withId(ids...)                   Players.nearest()
+
+// an Entity
+e.id()  e.uid()  e.worldX()  e.worldY()  e.distance()
+e.animation()  e.isIdle()  e.orientation()  e.screen()
+
+// you
+Game.me().worldX()   .isIdle()   .health()   .healthPercent()   .runEnergy()
+
+// stats
+Skills.level(Skill.WOODCUTTING)   Skills.experience(...)   Skills.boost(...)
+
+// kewl.api.Actions -- doing things, in WORLD coordinates
+Actions.walkTo(x, y)
+Actions.object(treeId, x, y)          // chop / mine / open
+Actions.npc(entity)                   // first option
+Actions.npc(entity, 2)                // second option
 ```
 
 **Two coordinate systems, and mixing them up is the most common bug here.** World coordinates are what
-your minimap shows (Lumbridge ≈ 3222, 3218). Scene coordinates are 0–104 within the loaded chunk, which
-is what the game's click function wants. Everything on `Game` takes **world** coordinates and converts
-internally, so you rarely have to care.
+your minimap shows (Lumbridge ≈ 3222, 3218). Scene coordinates are 0–104 within the loaded chunk, and
+they are what the game's click function actually wants. Everything a plugin touches is in **world**
+coordinates; the conversion happens in one place.
+
+### Drawing
+
+`render()` hands you a `Graphics2D` over the whole game window, already antialiased, with (0,0) at the
+top-left of the game's client area. Anything Java2D can do works. `kewl.ui.Hud` has the three things
+every overlay ends up wanting:
+
+```java
+Hud.entityBox(g, point, 16, 30, colour);          // a box standing on a point
+Hud.tile(g, Game.tileOutlineWorld(x, y), colour); // a tile highlight lying on the ground
+Hud.text(g, "hello", x, y, colour);               // text with an outline, readable on any background
+
+Hud.panel(g, 12, 12, "My plugin", new Hud.Lines() // a statistics panel that sizes itself
+        .add("state", "running")
+        .add("xp/hr", 41234));
+```
+
+Tile outlines go through the game's own projection corner by corner, so they sit on the ground with the
+right perspective and stay correct while the camera turns.
 
 ---
 
@@ -141,15 +220,28 @@ remote thread. The oldest, most boring injection there is, in about thirty lines
 
 ### The native half
 - `client/offsets.hpp` — every game-specific number, in one file, each with a note on how to re-find it.
-- `client/game.hpp` — guarded memory reads, entity enumeration, the world→screen projection, and
-  `doAction`.
-- `client/jvm.hpp` — starts the JVM and registers the four natives.
-- `client/dllmain.cpp` — the overlay window and the 30 fps loop.
+- `client/game.hpp` — guarded memory reads, entity enumeration, projection, and `doAction`.
+- `client/overlay.hpp` — the transparent window, and the one function that puts pixels in it.
+- `client/jvm.hpp` — starts the JVM and registers the ten natives. The whole unsafe surface.
+- `client/dllmain.cpp` — finds the game window and runs the 30 fps loop.
+
+### The Java half
+- `java/kewl/Natives.java` — the ten natives, declared. You will not call these directly.
+- `java/kewl/api/` — the world with names on it: `Game`, `Entity`, `Local`, `Npcs`, `Players`, `Skills`,
+  `Actions`.
+- `java/kewl/ui/` — `Theme` (all the colours), `Hud` (drawing helpers), `Sidebar` (the control panel).
+- `java/kewl/config/` — settings that build their own controls.
+- `java/kewl/plugins/` — the plugins.
 
 The overlay is a **transparent always-on-top window**, not a renderer hook. Hooking would need a detour
 library, a graphics API to get right, and it crashes inside someone else's render loop when you get it
-wrong. A layered window is forty lines you can read in one sitting. The cost: it looks worse, and it
-will not show up in screenshots or recordings. That trade is on purpose.
+wrong. A layered window is a page of code you can read in one sitting. The cost: it will not show up in
+screenshots or recordings, and it can flicker. That trade is on purpose.
+
+**Java does the drawing.** C++ used to draw the boxes and it was the wrong split: every new visual meant
+a new primitive exposed across the JNI boundary. Now Java renders the frame into an image and C++ shows
+it, so a plugin has the whole of Java2D and C++ has one job. It costs one memcpy of a full-screen image
+per frame — about 8 MB at 1080p, well under a millisecond, and we were already blitting those pixels.
 
 ### Why there is no packet code
 Bot clients usually reimplement the game's network protocol — a big table of opcodes and byte layouts
@@ -214,17 +306,20 @@ how every number in this repo was found — none of them were guessed.
 
 Genuinely useful, roughly easiest first:
 
-1. **Find the nearest tree automatically.** The woodcutter currently needs a hard-coded tile because
-   scanning scenery means walking the scene's object grid — about six more offsets. Land this and every
-   gathering bot gets easier. *(the highest-value one on this list)*
-2. **Draw NPC names.** The name lives behind a pointer on the entity; the `npcName` binding shows the
-   chain.
-3. **Inventory reading.** Needed by nearly every bot for "am I full yet".
-4. **A `walkTo(x, y)` helper.** The walk action is another `doAction` opcode.
-5. **Make the panel less ugly.** Low stakes, all GDI, a fine first PR.
+1. **Find the nearest tree automatically.** The woodcutter needs a typed-in tile because nothing here can
+   enumerate scenery — that means walking the scene's object grid, about six more offsets. Land this and
+   every gathering plugin gets shorter, and the woodcutter loses its most awkward setting.
+   *(the highest-value one on this list, by a distance)*
+2. **Names.** NPC and player names live behind a pointer chain the client's own `npcName` binding walks.
+   Everything currently shows an id where it wants to show a name.
+3. **Inventory reading.** Nearly every bot needs "am I full yet".
+4. **Ground items.** Pairs with the above to make a looter possible.
+5. **Saving settings.** Config lives in memory and dies with the client. A small properties file next to
+   the jar, written on change, would do it — no new offsets, pure Java, a good first PR.
+6. **A minimap overlay.** All the pieces exist; it just needs the minimap's own projection.
 
-Please keep the two rules this codebase is built on: **no packet building**, and **every offset gets a
-comment saying how it was found**.
+Please keep the three rules this codebase is built on: **no packet building**, **every offset gets a
+comment saying how it was found**, and **nothing claims to work until it has been seen working**.
 
 ---
 

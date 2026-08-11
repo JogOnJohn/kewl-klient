@@ -1,94 +1,207 @@
 package kewl.plugins;
 
-import kewl.Game;
-import kewl.Plugin;
+import java.awt.BasicStroke;
+import java.awt.Color;
+import java.awt.Graphics2D;
+import java.awt.Point;
+import java.awt.Polygon;
+import java.awt.Stroke;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.util.Properties;
+import kewl.Plugin;
+import kewl.api.Actions;
+import kewl.api.Game;
+import kewl.api.Local;
+import kewl.api.Skill;
+import kewl.api.Skills;
+import kewl.ui.Hud;
+import kewl.ui.Theme;
 
 /**
- * The example plugin, and deliberately the dumbest thing that actually works: it re-clicks one tree on a
- * timer.
+ * Chops one tree, and draws what it is doing.
  *
- * <p>That really is the whole bot. The game ignores a click on something you are already interacting
- * with, so clicking every few seconds costs nothing and picks you back up after the tree respawns or you
- * get bumped. Toggle it with <b>F5</b>.</p>
+ * <p><b>This is the worked example.</b> It is deliberately the most complete plugin in the repo and
+ * deliberately still short, because it shows all four things a plugin can do and how they fit together:
+ * settings you can change while it runs, a decision loop that acts on the game, an overlay that draws in
+ * the world, and a panel of statistics. Copy this file when you write your own.</p>
  *
- * <p>Configure it in {@code kewlklient.ini}, next to the DLL:</p>
+ * <h2>Using it</h2>
  *
- * <pre>
- * [woodcutter]
- * tree=1278     ; object id — 1278 is a plain tree
- * x=3163        ; WORLD x of the tile the tree stands on
- * y=3441        ; WORLD y
- * </pre>
+ * <ol>
+ *   <li>Turn on <b>NPC visuals</b> if you want to read ids off things.</li>
+ *   <li>Stand next to your tree. The overlay tells you the tile you are on.</li>
+ *   <li>Type that tile and the tree's id into this plugin's settings.</li>
+ *   <li>Tick the box.</li>
+ * </ol>
  *
- * <p><b>Why you have to type the tile in.</b> Finding the nearest tree by yourself means walking the
- * scene's object grid, which needs about six offsets this client does not have yet. That is the single
- * best first contribution to KewlKlient and it is written up in the README under "Good first
- * contributions" — do that and this plugin becomes three lines shorter and a lot smarter.</p>
+ * <p>Typing coordinates in by hand is not elegant, and the reason is worth stating plainly: this client
+ * cannot yet enumerate scenery, so nothing can find the nearest tree for you. That is the top item on
+ * the contribution list in the README, and landing it would make this plugin four lines shorter and
+ * every gathering plugin easier to write.</p>
  */
-public final class Woodcutter implements Plugin {
+public final class Woodcutter extends Plugin {
 
-    private static final int F5 = 1;               // bit 0 of the key mask
-    private static final long INTERVAL_MS = 4000;
+    /** Willow. Any tree works -- this is just a default that is not zero. */
+    private static final int DEFAULT_TREE = 1278;
 
-    private boolean enabled;
-    private int treeId = 1278;
-    private int worldX, worldY;
     private long lastClick;
+    private long startedAt;
+    private int startXp;
+    private int clicks;
 
-    @Override public String name() { return "woodcutter"; }
-    @Override public boolean enabled() { return enabled; }
-    @Override public void setEnabled(boolean on) { enabled = on; }
-
-    @Override
-    public void keys(int pressed) {
-        if ((pressed & F5) != 0) enabled = !enabled;
+    public Woodcutter() {
+        config.text("tree", "Tree id", "The scenery id to chop. 1278 is an ordinary tree.",
+                String.valueOf(DEFAULT_TREE));
+        config.text("x", "Tile x", "World x of the tree. The overlay shows yours.", "");
+        config.text("y", "Tile y", "World y of the tree.", "");
+        config.number("delay", "Click delay", "Seconds to wait before clicking again", 4, 1, 15);
+        config.colour("colour", "Highlight", "Colour of the tree marker", new Color(90, 220, 120));
+        config.bool("panel", "Show statistics", "Draw the xp panel", true);
     }
 
-    @Override
-    public void start() {
-        // The ini sits next to the DLL, which is also the working directory the game was started from.
-        File ini = new File("kewlklient.ini");
-        if (!ini.isFile()) return;                 // no config: stay idle and say so in status()
-        Properties p = new Properties();
-        try (FileInputStream in = new FileInputStream(ini)) {
-            p.load(in);                            // Properties ignores the [woodcutter] header line
-        } catch (Exception e) {
-            System.out.println("[woodcutter] could not read kewlklient.ini: " + e);
-            return;
-        }
-        treeId = intOr(p, "tree", treeId);
-        worldX = intOr(p, "x", 0);
-        worldY = intOr(p, "y", 0);
-    }
+    @Override public String name() { return "Woodcutter"; }
+
+    @Override public String description() { return "Chops one tree. The worked example -- read this one."; }
+
+    @Override public int hotkey() { return 4; }          // F5
 
     @Override
-    public void tick() {
-        if (worldX == 0 && worldY == 0) return;    // nothing configured
-
-        long now = System.currentTimeMillis();
-        if (now - lastClick < INTERVAL_MS) return;
-
-        // interactObject returns false when the tile is outside the loaded scene — you walked away, or
-        // the world has not finished loading. Do not reset the timer in that case; just try again.
-        if (Game.interactObject(treeId, worldX, worldY)) lastClick = now;
+    protected void onEnable() {
+        startedAt = System.currentTimeMillis();
+        startXp = Skills.experience(Skill.WOODCUTTING);
+        clicks = 0;
+        lastClick = 0;
     }
 
     @Override
     public String status() {
-        if (worldX == 0 && worldY == 0) return "no tile set — edit kewlklient.ini";
-        return (enabled ? "ON " : "off") + "  tree=" + treeId + " @ " + worldX + "," + worldY;
+        if (!hasTarget()) return "set a tile";
+        return gainedXp() + " xp, " + clicks + " clicks";
     }
 
-    private static int intOr(Properties p, String key, int fallback) {
-        try {
-            String v = p.getProperty(key);
-            return v == null ? fallback : Integer.parseInt(v.trim().split("\\s*;")[0].trim());
-        } catch (RuntimeException e) {
-            return fallback;
+    // -----------------------------------------------------------------------------------------------
+    // Deciding and acting
+    // -----------------------------------------------------------------------------------------------
+
+    @Override
+    public void tick() {
+        if (!Game.ready() || !hasTarget()) return;
+
+        Local me = Game.me();
+
+        // Two guards, and they are the whole bot.
+        //
+        // The animation check is what stops it clicking while it is already chopping. The timer is what
+        // stops it clicking the instant the animation ends -- the game takes a moment to start the next
+        // one, so a bot that only checked the animation would fire two or three clicks into that gap
+        // and look exactly like a bot.
+        if (!me.isIdle()) return;
+        long now = System.currentTimeMillis();
+        if (now - lastClick < config.number("delay") * 1000L) return;
+
+        if (Actions.object(treeId(), targetX(), targetY())) {
+            lastClick = now;
+            clicks++;
         }
+    }
+
+    // -----------------------------------------------------------------------------------------------
+    // Drawing
+    // -----------------------------------------------------------------------------------------------
+
+    @Override
+    public void render(Graphics2D g) {
+        if (!Game.ready()) return;
+
+        Local me = Game.me();
+        Color colour = config.colour("colour");
+        g.setFont(Theme.UI);
+
+        if (!hasTarget()) {
+            // Nothing to chop yet, so be useful: tell them where they are, which is the number they
+            // need to type in. A plugin that just does nothing when misconfigured is a bad plugin.
+            Point here = Game.projectTile(me.sceneX(), me.sceneY());
+            Hud.tile(g, Game.tileOutline(me.sceneX(), me.sceneY()), Theme.WARN);
+            if (here != null) {
+                Hud.textCentred(g, "you are at " + me.worldX() + ", " + me.worldY(),
+                        here.x, here.y - 14, Theme.WARN);
+            }
+            Hud.Lines lines = new Hud.Lines()
+                    .add("tile x", me.worldX())
+                    .add("tile y", me.worldY())
+                    .add("Type these into the plugin");
+            Hud.panel(g, 12, 12, "Woodcutter: not set up", lines);
+            return;
+        }
+
+        // The target tile, outlined on the ground. tileOutlineWorld returns null when the tile is not
+        // in the loaded chunk or is off screen, and null simply means "do not draw" -- there is nothing
+        // to handle.
+        Polygon outline = Game.tileOutlineWorld(targetX(), targetY());
+        Hud.tile(g, outline, colour);
+
+        Point target = Game.projectWorld(targetX(), targetY());
+        if (target != null) {
+            Hud.textCentred(g, "tree " + treeId(), target.x, target.y - 12, colour);
+
+            // A line from you to the tree, so it is obvious at a glance what it is aiming at.
+            Point mine = Game.projectTile(me.sceneX(), me.sceneY());
+            if (mine != null) {
+                Stroke old = g.getStroke();
+                g.setStroke(new BasicStroke(1.5f));
+                g.setColor(Theme.alpha(colour, 120));
+                g.drawLine(mine.x, mine.y, target.x, target.y);
+                g.setStroke(old);
+            }
+        }
+
+        if (config.bool("panel")) {
+            boolean chopping = !me.isIdle();
+            Hud.Lines lines = new Hud.Lines()
+                    .add("state", chopping ? "chopping" : "waiting", chopping ? Theme.ON : Theme.TEXT_DIM)
+                    .add("level", Skills.level(Skill.WOODCUTTING))
+                    .add("xp gained", gainedXp())
+                    .add("xp / hour", xpPerHour())
+                    .add("clicks", clicks)
+                    .add("running", elapsed());
+            Hud.panel(g, 12, 12, "Woodcutter", lines);
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------------
+    // Settings, read defensively -- the text boxes contain whatever somebody typed
+    // -----------------------------------------------------------------------------------------------
+
+    private boolean hasTarget() {
+        return treeId() > 0 && targetX() > 0 && targetY() > 0;
+    }
+
+    private int treeId() { return parse(config.text("tree")); }
+
+    private int targetX() { return parse(config.text("x")); }
+
+    private int targetY() { return parse(config.text("y")); }
+
+    /** Zero for anything that is not a number, which {@link #hasTarget()} then treats as "not set". */
+    private static int parse(String s) {
+        try {
+            return Integer.parseInt(s.trim());
+        } catch (RuntimeException e) {
+            return 0;
+        }
+    }
+
+    private int gainedXp() {
+        return Math.max(0, Skills.experience(Skill.WOODCUTTING) - startXp);
+    }
+
+    private int xpPerHour() {
+        long ms = System.currentTimeMillis() - startedAt;
+        if (ms < 10_000) return 0;                       // too early to mean anything
+        return (int) (gainedXp() * 3_600_000L / ms);
+    }
+
+    private String elapsed() {
+        long s = (System.currentTimeMillis() - startedAt) / 1000;
+        return String.format("%d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60);
     }
 }

@@ -80,11 +80,11 @@ When two sources disagree, prefer them in this order:
 1. What the running client was **observed doing** (a capture, a log line).
 2. What the running client **reads right now** (a live memory read).
 3. The game **cache** on disk.
-4. A **reference implementation** from another project — different game revision, so treat its numbers
-   as names and shapes, not as values.
+4. **Anything written down elsewhere** — a wiki, a forum post, an older copy of this repo. It was
+   measured on a different build, so treat those numbers as names and shapes, not as values.
 
 ## When you are done
 
 Say plainly which of these you did: derived it from the binary, confirmed it against a running client,
-or inferred it from a reference. Those are three different levels of certainty and the next person
-cannot tell them apart from the code alone.
+or took it from something already written down. Those are three different levels of certainty and the
+next person cannot tell them apart from the code alone.

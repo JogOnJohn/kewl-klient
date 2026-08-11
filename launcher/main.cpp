@@ -1,4 +1,4 @@
-// launcher/main.cpp -- one window, one button.
+﻿// launcher/main.cpp -- one window, one button.
 //
 // Start the game yourself, log in, then press the button. It finds the game process and injects
 // kewlklient.dll into it with LoadLibrary on a remote thread -- the oldest and most boring injection
@@ -28,6 +28,27 @@ DWORD findGame() {
     }
     CloseHandle(snap);
     return pid;
+}
+
+/// True if the target process already has a module with this name loaded.
+///
+/// This matters more than it looks. LoadLibrary on an ALREADY-LOADED module does not reload it -- it
+/// bumps a reference count and hands back the existing handle. So injecting a second time into a
+/// running game silently keeps the OLD code, and the button reports success while nothing whatsoever
+/// has changed. After a rebuild you must restart the game, and the only kind thing to do is say so
+/// rather than let somebody test the same stale build four times.
+bool alreadyLoaded(DWORD pid, const wchar_t* moduleName) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    MODULEENTRY32W me{ sizeof me };
+    bool found = false;
+    if (Module32FirstW(snap, &me)) {
+        do {
+            if (_wcsicmp(me.szModule, moduleName) == 0) { found = true; break; }
+        } while (Module32NextW(snap, &me));
+    }
+    CloseHandle(snap);
+    return found;
 }
 
 /// Write the DLL path into the target and make it call LoadLibraryA on it.
@@ -74,6 +95,13 @@ void onLaunch() {
     DWORD pid = findGame();
     if (!pid) { say(L"osclient.exe is not running -- start the game and log in first."); return; }
 
+    if (alreadyLoaded(pid, L"kewlklient.dll")) {
+        say(L"Already injected into this game.\r\n"
+            L"If you just rebuilt, CLOSE OSRS and start it again -- Windows will not\r\n"
+            L"reload a DLL that is already in the process.");
+        return;
+    }
+
     char exe[MAX_PATH]{};
     GetModuleFileNameA(nullptr, exe, MAX_PATH);
     std::string dll(exe);
@@ -96,7 +124,7 @@ LRESULT CALLBACK wndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                       WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                       20, 20, 320, 56, h, reinterpret_cast<HMENU>(1), nullptr, nullptr);
         g_status = CreateWindowW(L"STATIC", L"Start the game, log in, then press the button.",
-                                 WS_CHILD | WS_VISIBLE, 20, 88, 320, 40, h, nullptr, nullptr, nullptr);
+                                 WS_CHILD | WS_VISIBLE, 20, 88, 320, 64, h, nullptr, nullptr, nullptr);
         return 0;
     case WM_COMMAND:
         if (LOWORD(w) == 1) onLaunch();
@@ -135,3 +163,4 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR, int show) {
     }
     return 0;
 }
+

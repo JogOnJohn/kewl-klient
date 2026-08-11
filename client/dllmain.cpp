@@ -1,4 +1,4 @@
-// dllmain.cpp -- KewlKlient's native half.
+﻿// dllmain.cpp -- KewlKlient's native half.
 //
 // Injected into the game, it does four things and then gets out of the way:
 //   1. starts a Java VM and registers the natives (jvm.hpp),
@@ -14,6 +14,7 @@
 // silently is a client nobody can fix.
 #include <windows.h>
 #include <string>
+#include <vector>
 #include "game.hpp"
 #include "overlay.hpp"
 #include "jvm.hpp"
@@ -50,12 +51,26 @@ HWND findGameWindow() {
 void renderJavaError(int w, int h) {
     if (!kk::overlay::ensureSurface(w, h)) return;
 
+    // Wrap the message: it carries a full filesystem path now, which is the whole point of it, and a
+    // path clipped at the panel edge hides exactly the character that is wrong.
+    const std::size_t kWrap = 74;
+    std::vector<std::string> body;
+    for (std::size_t i = 0; i < g_javaError.size(); i += kWrap) {
+        body.push_back(g_javaError.substr(i, kWrap));
+    }
+    if (body.empty()) body.push_back("(no reason given)");
+    body.push_back("");
+    body.push_back("Fix java= in kewlklient.ini, next to this DLL, then restart the game.");
+
+    const int lineH = 18;
+    int panelH = 34 + lineH * static_cast<int>(body.size()) + 10;
+
     // Start from fully transparent, then paint an opaque panel. Every pixel we touch needs alpha 255
     // or UpdateLayeredWindow will treat it as invisible.
     std::memset(kk::overlay::g_pixels, 0, static_cast<std::size_t>(w) * h * 4);
 
     HDC dc = kk::overlay::g_memDc;
-    RECT panel{ 10, 10, 560, 84 };
+    RECT panel{ 10, 10, 640, 10 + panelH };
     HBRUSH bg = CreateSolidBrush(RGB(24, 24, 28));
     FillRect(dc, &panel, bg);
     DeleteObject(bg);
@@ -63,15 +78,18 @@ void renderJavaError(int w, int h) {
     SetBkMode(dc, TRANSPARENT);
     HFONT font = CreateFontA(15, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                             FF_DONTCARE, "Segoe UI");
+                             FF_DONTCARE, "Consolas");
     HGDIOBJ oldFont = SelectObject(dc, font);
 
     SetTextColor(dc, RGB(255, 120, 120));
     TextOutA(dc, 22, 20, "KewlKlient: Java did not start", 30);
-    SetTextColor(dc, RGB(210, 210, 215));
-    TextOutA(dc, 22, 42, g_javaError.c_str(), static_cast<int>(g_javaError.size()));
-    SetTextColor(dc, RGB(140, 140, 150));
-    TextOutA(dc, 22, 60, "check java= in kewlklient.ini", 29);
+
+    int y = 44;
+    for (std::size_t i = 0; i < body.size(); ++i) {
+        SetTextColor(dc, i + 1 == body.size() ? RGB(140, 140, 150) : RGB(220, 220, 226));
+        TextOutA(dc, 22, y, body[i].c_str(), static_cast<int>(body[i].size()));
+        y += lineH;
+    }
 
     SelectObject(dc, oldFont);
     DeleteObject(font);
@@ -187,3 +205,4 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     }
     return TRUE;
 }
+

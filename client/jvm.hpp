@@ -176,21 +176,54 @@ inline std::string narrow(const std::wstring& w) {
 }
 
 /// Load jvm.dll. `javaHome` comes from kewlklient.ini so nobody has to guess where your JDK is.
-inline HMODULE loadJvmDll(const std::wstring& javaHome) {
+/// `detail` is filled in on failure with the exact path tried and the Win32 error, because "check
+/// java= in kewlklient.ini" is useless advice on its own -- it does not say what the client READ, and a
+/// path that is subtly mangled (a lost backslash, a stray quote) looks correct at a glance in the file.
+/// Print what was attempted and the problem is usually obvious on sight.
+inline HMODULE loadJvmDll(const std::wstring& javaHome, std::string& detail) {
+    // Tell the loader about the JDK's own bin directory before asking for jvm.dll.
+    //
+    // jvm.dll does not stand alone -- it pulls in siblings that live in the JDK's bin, one level up
+    // from bin\server. A plain LoadLibrary resolves those through the HOST process's search path, and
+    // we are inside somebody else's process: if the game has narrowed its default search directories
+    // (a normal hardening step), the load fails with ERROR_MOD_NOT_FOUND for a file that is plainly
+    // sitting right there. AddDllDirectory is additive and per-process rather than replacing anything,
+    // so unlike SetDllDirectory it cannot disturb how the game resolves its own DLLs.
+    std::wstring bin = javaHome + L"\\bin";
+    AddDllDirectory(bin.c_str());
+
     // A JDK has it under bin\server, a JRE sometimes under bin\client. Try both, then give up.
     const wchar_t* rel[] = { L"\\bin\\server\\jvm.dll", L"\\bin\\client\\jvm.dll" };
+    DWORD lastError = 0;
     for (const wchar_t* r : rel) {
-        HMODULE m = LoadLibraryW((javaHome + r).c_str());
+        std::wstring full = javaHome + r;
+
+        // The widened search first; then a plain load, because the flags below need the directory to
+        // have been registered and an older or stranger host may not cooperate. Whichever works, works.
+        HMODULE m = LoadLibraryExW(full.c_str(), nullptr,
+                                   LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
+                                   LOAD_LIBRARY_SEARCH_USER_DIRS |
+                                   LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
+        if (!m) m = LoadLibraryW(full.c_str());
         if (m) return m;
+        lastError = GetLastError();
     }
+
+    detail = narrow(javaHome + rel[0]);
+    detail += "  (error " + std::to_string(lastError);
+    if (lastError == 2)        detail += ": no such file -- is java= the JDK folder itself?";
+    else if (lastError == 126) detail += ": a dependency of jvm.dll is missing";
+    else if (lastError == 193) detail += ": that is a 32-bit JDK, the game is 64-bit";
+    detail += ")";
     return nullptr;
 }
 
 /// Start the VM, load the classes, wire the natives, call start(). Returns false with a reason you can
 /// show the user -- silent failure here is miserable to debug.
 inline bool startJvm(const std::wstring& javaHome, const std::wstring& jarPath, std::string& err) {
-    HMODULE jvmDll = loadJvmDll(javaHome);
-    if (!jvmDll) { err = "could not load jvm.dll -- check java= in kewlklient.ini"; return false; }
+    std::string detail;
+    HMODULE jvmDll = loadJvmDll(javaHome, detail);
+    if (!jvmDll) { err = "could not load " + detail; return false; }
 
     using CreateFn = jint(JNICALL*)(JavaVM**, void**, void*);
     auto create = reinterpret_cast<CreateFn>(GetProcAddress(jvmDll, "JNI_CreateJavaVM"));

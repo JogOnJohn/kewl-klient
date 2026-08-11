@@ -233,7 +233,18 @@ Expected — it is a layered window, not a renderer hook. See "The native half".
 
 ## Licence
 
-MIT. See `LICENSE`. Use it, fork it, learn from it.
+**GPL-3.0.** See [`LICENSE`](LICENSE). In plain terms:
+
+- **Anyone can use it**, for anything, including commercially.
+- **It has to stay open.** If you distribute a modified version — or anything built on it — you have to
+  ship the source under the GPL too. You cannot take this closed.
+- **Credit stays with it.** Keep the copyright notices and say what you changed.
+
+If you fork it, a link back here is appreciated on top of what the licence requires.
+
+Copyright (C) 2026 StoneShorts and the KewlKlient contributors.
+
+---
 
 This is a personal-use tool for your own account. Automating a game breaks its rules and can get that
 account banned. That is your call to make, and yours to live with.

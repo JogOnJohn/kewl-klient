@@ -140,10 +140,20 @@ tasks.register('writeIni') {
 
         // java= is filled in from the JDK running this build, so there is no manual edit step. That
         // setting existed because the DLL loads jvm.dll at runtime and cannot guess where it is.
+        //
+        // quoteReplacement is NOT optional here. replaceFirst treats backslashes in the REPLACEMENT
+        // string as escapes, so a plain Windows path goes in as C:\Users\me\jdk and comes out as
+        // C:Usersmejdk -- every separator silently eaten. The client then cannot find jvm.dll and says
+        // so, quoting a path that is visibly mangled but only if you look closely.
+        String path = gradleJdk.replace('/', '\\')
         def text = file('kewlklient.ini').text.replaceFirst(
-                /(?m)^java=.*$/, 'java=' + gradleJdk.replace('/', '\\'))
+                /(?m)^java=.*$/, 'java=' + java.util.regex.Matcher.quoteReplacement(path))
         target.text = text
-        logger.lifecycle("wrote ${target} (java=${gradleJdk})")
+
+        // Say what actually landed in the file, not what we meant to put there -- the whole failure
+        // above was a log line that looked right next to a file that was wrong.
+        logger.lifecycle("wrote ${target}")
+        text.readLines().findAll { it.startsWith('java=') }.each { logger.lifecycle("  ${it}") }
     }
 }
 

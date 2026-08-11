@@ -1,0 +1,28 @@
+# build output
+build/
+dist/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.class
+*.jar
+
+# reverse-engineering scratch -- these are large and machine-specific
+tools/offsets_found.txt
+*.i64
+*.idb
+*.til
+*.nam
+*.id0
+*.id1
+*.id2
+
+# never commit a copy of the game
+osclient.exe
+
+# editors
+.vs/
+.idea/
+*.user

@@ -8,6 +8,12 @@ dist/
 *.lib
 *.class
 *.jar
+# ...except the Gradle wrapper, which HAS to be committed: it is what lets somebody clone this and
+# build it without installing Gradle first.
+!gradle/wrapper/gradle-wrapper.jar
+
+# gradle
+.gradle/
 
 # reverse-engineering scratch -- these are large and machine-specific
 tools/offsets_found.txt

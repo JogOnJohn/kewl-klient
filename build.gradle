@@ -1,0 +1,197 @@
+// build.gradle -- the whole build, so "Run" in IntelliJ is the only step you need.
+//
+// Half of this project is C++ (the injected DLL) and half is Java (the plugins). Gradle drives both:
+// it compiles the Java, shells out to CMake for the native side, writes the config file, and starts
+// the launcher. You do not have to run CMake yourself.
+//
+//   gradlew run       build everything and start the launcher   <- the one you want
+//   gradlew dist      build everything, don't start it
+//   gradlew clean     throw it all away
+
+plugins {
+    id 'java'
+}
+
+repositories { mavenCentral() }      // nothing is pulled from here; the project has no dependencies.
+
+// The Java lives in java/, not src/main/java. This project is small enough that the extra nesting
+// bought nothing.
+sourceSets.main.java.srcDirs = ['java']
+sourceSets.main.resources.srcDirs = []
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+// Everything the launcher needs ends up here, side by side: KewlKlient.exe, kewlklient.dll,
+// kewlklient.jar, kewlklient.ini. The DLL finds the jar by looking next to itself, so they must stay
+// together -- this directory IS the shipping layout.
+def distDir = layout.buildDirectory.dir('dist')
+def nativeBuildDir = layout.buildDirectory.dir('native')
+
+jar {
+    archiveFileName = 'kewlklient.jar'
+    destinationDirectory = distDir
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The native half. CMake is invoked as an ordinary process -- no Gradle C++ plugin, because it would
+// need its own toolchain declarations for the same result.
+// ---------------------------------------------------------------------------------------------------
+
+/** The JDK Gradle itself is running on. CMake needs it to find jni.h, and it is the one JDK we KNOW exists. */
+def gradleJdk = System.getProperty('java.home')
+
+/**
+ * Fail with a sentence somebody can act on, instead of the raw "cmake: command not found" or the
+ * twenty-line CMake wall of text about no CXX compiler. These are the only two things this build needs
+ * that a fresh machine will not already have.
+ */
+tasks.register('checkToolchain') {
+    group = 'build'
+    description = 'Check CMake and a C++ compiler are present before trying to use them.'
+
+    doLast {
+        def onPath = { String exe ->
+            System.getenv('PATH').split(File.pathSeparator).any { dir ->
+                ['', '.exe', '.bat', '.cmd'].any { new File(dir, exe + it).canExecute() }
+            }
+        }
+
+        if (!onPath('cmake')) {
+            throw new GradleException(
+                    "\n\n  CMake is not installed (or not on your PATH).\n\n" +
+                    "  Half of this project is C++ -- the DLL that gets injected into the game -- so\n" +
+                    "  the build needs it. Get it from https://cmake.org/download/ and tick\n" +
+                    "  \"Add CMake to the system PATH\" in the installer, then reopen your terminal\n" +
+                    "  (or restart IntelliJ, which caches the PATH it was started with).\n")
+        }
+
+        // On Windows the compiler is the other half. MSVC is not on PATH outside a developer prompt,
+        // so its absence here proves nothing -- only warn, and let CMake give the real verdict.
+        if (!onPath('cl') && !onPath('g++') && !onPath('clang++')) {
+            def vs = new File(System.getenv('ProgramFiles(x86)') ?: 'C:\\Program Files (x86)',
+                    'Microsoft Visual Studio')
+            def vs64 = new File(System.getenv('ProgramFiles') ?: 'C:\\Program Files',
+                    'Microsoft Visual Studio')
+            if (!vs.exists() && !vs64.exists()) {
+                logger.warn(
+                        "\n  WARNING: no C++ compiler found on PATH and no Visual Studio installed.\n" +
+                        "  If the next step fails saying \"No CMAKE_CXX_COMPILER could be found\", install\n" +
+                        "  \"Build Tools for Visual Studio\" (the Desktop development with C++ workload)\n" +
+                        "  from https://visualstudio.microsoft.com/downloads/ -- you do not need the full IDE.\n")
+            }
+        }
+    }
+}
+
+tasks.register('cmakeConfigure', Exec) {
+    group = 'build'
+    description = 'Generate the native build files.'
+    dependsOn 'checkToolchain'
+    outputs.dir nativeBuildDir
+
+    doFirst {
+        nativeBuildDir.get().asFile.mkdirs()
+        // JAVA_HOME is how CMake's FindJNI locates jni.h. Passing the JDK Gradle is already using
+        // means the headers always match the JVM that will actually load the DLL.
+        environment 'JAVA_HOME', gradleJdk
+    }
+
+    // No -A x64: that flag only exists on the Visual Studio generators, and it hard-fails on mingw.
+    // The 64-bit check lives in CMakeLists.txt instead, where it works for every generator.
+    commandLine 'cmake',
+            '-S', projectDir.absolutePath,
+            '-B', nativeBuildDir.get().asFile.absolutePath,
+            "-DKEWL_DIST=${distDir.get().asFile.absolutePath}"
+}
+
+tasks.register('cmakeBuild', Exec) {
+    group = 'build'
+    description = 'Compile kewlklient.dll and KewlKlient.exe.'
+    dependsOn 'cmakeConfigure'
+
+    doFirst { environment 'JAVA_HOME', gradleJdk }
+
+    // --config Release is ignored by single-config generators (mingw) and required by multi-config
+    // ones (Visual Studio), so passing it always is correct for both.
+    commandLine 'cmake', '--build', nativeBuildDir.get().asFile.absolutePath, '--config', 'Release'
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Config file
+// ---------------------------------------------------------------------------------------------------
+
+tasks.register('writeIni') {
+    group = 'build'
+    description = 'Put kewlklient.ini next to the DLL, pointed at this JDK.'
+
+    doLast {
+        def target = distDir.get().file('kewlklient.ini').asFile
+        target.parentFile.mkdirs()
+
+        // Only ever written once. After that it is YOURS -- the woodcutter's tree and coordinates live
+        // in here, and a build silently reverting them would be maddening.
+        if (target.exists()) {
+            logger.lifecycle("kewlklient.ini already exists, leaving it alone")
+            return
+        }
+
+        // java= is filled in from the JDK running this build, so there is no manual edit step. That
+        // setting existed because the DLL loads jvm.dll at runtime and cannot guess where it is.
+        def text = file('kewlklient.ini').text.replaceFirst(
+                /(?m)^java=.*$/, 'java=' + gradleJdk.replace('/', '\\'))
+        target.text = text
+        logger.lifecycle("wrote ${target} (java=${gradleJdk})")
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The two tasks you actually type
+// ---------------------------------------------------------------------------------------------------
+
+tasks.register('dist') {
+    group = 'build'
+    description = 'Build everything into build/dist, ready to run.'
+    dependsOn 'jar', 'cmakeBuild', 'writeIni'
+
+    doLast {
+        // CHECK THE FILES, NOT THE EXIT CODE. A CMake target-name collision once produced two copies of
+        // the launcher and no DLL at all, and every tool in the chain reported success -- MSBuild built
+        // both projects it was given, and Gradle saw a zero exit. The only thing that noticed was
+        // looking in the directory. So: look in the directory.
+        def required = ['KewlKlient.exe', 'kewlklient.dll', 'kewlklient.jar', 'kewlklient.ini']
+        def missing = required.findAll { !distDir.get().file(it).asFile.exists() }
+        if (missing) {
+            throw new GradleException(
+                    "\n\n  The build reported success but did not produce: ${missing.join(', ')}\n\n" +
+                    "  Everything the launcher needs has to sit in\n    ${distDir.get().asFile}\n" +
+                    "  Scroll up for the CMake or javac error that caused this.\n")
+        }
+
+        logger.lifecycle("\n  built -> ${distDir.get().asFile}")
+        distDir.get().asFile.listFiles()?.sort { it.name }?.each { logger.lifecycle("    ${it.name}") }
+    }
+}
+
+tasks.register('run', Exec) {
+    group = 'application'
+    description = 'Build everything, then open the launcher.'
+    dependsOn 'dist'
+
+    doFirst {
+        def exe = distDir.get().file('KewlKlient.exe').asFile
+        if (!exe.exists()) {
+            throw new GradleException("KewlKlient.exe was not built. Look for the CMake error above this.")
+        }
+        logger.lifecycle("\n  Start OSRS and log in, then press LAUNCH OSRS CLIENT NOW.\n")
+    }
+
+    commandLine distDir.get().file('KewlKlient.exe').asFile.absolutePath
+}
+
+// `gradlew clean` should also remove the native build tree, which lives outside Gradle's knowledge.
+clean {
+    delete nativeBuildDir
+}

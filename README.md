@@ -26,19 +26,37 @@ no auto-updater, no account manager, no plugin store. What there is:
 
 ## Quick start
 
-You need: **CMake**, a **64-bit C++ compiler** (MSVC from Visual Studio Build Tools, or mingw-w64), and a
-**JDK 17 or newer**.
+**Windows only.** The whole thing is Win32 — there is no Linux or Mac build and there is not going to be
+one.
+
+You need three things installed. The first two you probably have; the third is the one people miss:
+
+| | why | get it |
+|---|---|---|
+| **JDK 17+** | the plugins are Java | IntelliJ ships one, or [adoptium.net](https://adoptium.net) |
+| **CMake** | the injected part is C++ | [cmake.org/download](https://cmake.org/download/) — tick *Add CMake to the system PATH* |
+| **A C++ compiler** | same | [Build Tools for Visual Studio](https://visualstudio.microsoft.com/downloads/) → *Desktop development with C++*. The full IDE is not needed. |
+
+You do **not** need Gradle — the wrapper in this repo fetches it.
+
+### From IntelliJ
+
+1. **File → Open** and pick the folder you cloned. It imports as a Gradle project.
+2. Pick the **KewlKlient** run configuration (it is checked into the repo) and press **Run**.
+3. Start OSRS and **log in**.
+4. In the little window that appeared, press **LAUNCH OSRS CLIENT NOW**.
+
+That is it — no config file to edit. The build points `kewlklient.ini` at whichever JDK IntelliJ is
+using, and puts everything in `build\dist\`.
+
+### From a terminal
 
 ```bat
-set JAVA_HOME=C:\Program Files\Java\jdk-21
-build.bat
+gradlew run
 ```
 
-Everything lands in `build\dist\`. Then:
-
-1. Open `build\dist\kewlklient.ini` and set `java=` to your JDK folder.
-2. Start OSRS and **log in**.
-3. Run `build\dist\KewlKlient.exe` and press **LAUNCH OSRS CLIENT NOW**.
+Same thing. `gradlew dist` builds without launching, and `build.bat` is a wrapper around it for people
+who prefer a double-click.
 
 In game:
 
@@ -220,8 +238,17 @@ game refused the DLL, you built 32-bit — the game is x64 and rejects a 32-bit 
 `java=` in `kewlklient.ini` is wrong. It needs a folder with `bin\server\jvm.dll` under it. A JDK always
 has that; some JREs do not.
 
+**The build says "CMake is not installed (or not on your PATH)".**
+Install it from the table above. If you just installed it, **restart IntelliJ** — it caches the `PATH`
+it was started with, so a new install is invisible to it until then.
+
+**The build says "No CMAKE_CXX_COMPILER could be found".**
+No C++ compiler. Install the Build Tools from the table above.
+
 **The overlay says "kewl/KewlKlient not found".**
-`kewlklient.jar` must sit next to `kewlklient.dll`. `build.bat` puts them together in `build\dist\`.
+`kewlklient.jar` must sit next to `kewlklient.dll`. `gradlew dist` puts all four files in `build\dist\`
+and now checks they are actually there before claiming success — it used to be possible for the build
+to pass while producing no DLL at all.
 
 **Boxes are in the wrong place, or the client crashes on inject.**
 The game updated and the offsets moved. See [When the game updates](#when-the-game-updates).

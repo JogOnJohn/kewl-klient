@@ -11,6 +11,14 @@ Read these in order before changing code:
 3. `docs/development.md` before building or changing the environment.
 4. `docs/reverse-engineering.md` before touching `client/offsets.hpp`.
 
+## Learning-first communication
+
+Assume a collaborator may be new to the tooling. Use plain English first;
+when a technical term or acronym is useful, write its expanded meaning in
+brackets and explain why it matters before using it. Do not assume background
+knowledge, and do not rush through analysis: explain what each step proves and
+let the learner drive the Ghidra interface when they want to follow along.
+
 ## Repository map
 
 - `launcher/` - Windows launcher.

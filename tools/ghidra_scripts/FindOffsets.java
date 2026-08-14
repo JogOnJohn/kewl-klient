@@ -71,7 +71,7 @@ public class FindOffsets extends GhidraScript {
         out.add("#   for the function pointer it registers next to the name -- that is your leaf. Put its");
         out.add("#   rva in client/offsets.hpp and re-check BUILD_ID at the same time.");
 
-        File f = new File(getSourceFile().getParentFile().getParentFile(), "offsets_found.txt");
+        File f = new File(getSourceFile().getParentFile().getParentFile().getFile(false), "offsets_found.txt");
         try (PrintWriter w = new PrintWriter(f)) {
             for (String line : out) w.println(line);
         }
@@ -81,7 +81,10 @@ public class FindOffsets extends GhidraScript {
     /** Every defined string in the binary equal to `want`. */
     private List<Address> findStrings(String want) {
         List<Address> hits = new ArrayList<>();
-        for (var data : DefinedDataIterator.definedStrings(currentProgram)) {
+        var strings = DefinedDataIterator.byDataInstance(currentProgram,
+                data -> StringDataInstance.getStringDataInstance(data) != null);
+        while (strings.hasNext()) {
+            var data = strings.next();
             StringDataInstance s = StringDataInstance.getStringDataInstance(data);
             String v = s.getStringValue();
             if (v != null && v.equals(want)) hits.add(data.getAddress());

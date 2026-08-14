@@ -34,11 +34,19 @@ $scriptDir = Join-Path $PSScriptRoot "ghidra_scripts"
 
 # -import on the first run creates and analyses the project. On later runs Ghidra notices the program is
 # already there and reuses the analysis, which is why this is slow exactly once.
-& $headless $Project KewlKlient `
-    -import $Client `
-    -scriptPath $scriptDir `
-    -postScript $Script `
-    -analysisTimeoutPerFile 3600
+# Invoke the batch file through cmd.exe with every argument quoted. Calling a .bat directly from
+# PowerShell drops the quotes around a client path such as "Program Files (x86)", causing cmd to parse
+# the path as multiple arguments before Ghidra starts.
+$command = @(
+    ('"{0}"' -f $headless),
+    ('"{0}"' -f $Project),
+    'KewlKlient',
+    '-import', ('"{0}"' -f $Client),
+    '-scriptPath', ('"{0}"' -f $scriptDir),
+    '-postScript', ('"{0}"' -f $Script),
+    '-analysisTimeoutPerFile', '3600'
+) -join ' '
+& $env:ComSpec /d /c $command
 
 Write-Host ""
 Write-Host "results (if the script wrote any): tools\offsets_found.txt"
